@@ -18,7 +18,7 @@ pipeline {
             steps{		
 		sh "scp -r test.py srvamr-sfaops@10.191.97.113:/tmp"
 		sh "scp -r test.py srvamr-sfaops@10.191.112.123:/tmp"    
-                sh "ssh srvamr-sfaops@10.191.112.123 'chmod -R 775 /tmp/test'"
+                sh "ssh srvamr-sfaops@10.191.112.123 'chmod -R 775 /tmp/test.py'"
                		
 		}
             
