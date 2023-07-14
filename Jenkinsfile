@@ -17,7 +17,7 @@ pipeline {
             }
             steps{		
 		sh "scp -r test.py srvamr-sfaops@10.191.97.113:/app/etl/palign/scripts/scripts_ui/python_scripts"
-		sh "sudo ssh srvamr-sfaops@10.191.97.113 'chmod -R 775 /app/etl/palign/scripts/scripts_ui/python_scripts/*'"   
+		sh "sudo ssh srvamr-sfaops@10.191.97.113 'chmod 775 /app/etl/palign/scripts/scripts_ui/python_scripts/*'"   
 		//sh "sudo ssh srvamr-sfaops@10.191.97.113 'chown srvamr-palign:unix-palign-u /app/etl/palign/scripts/scripts_ui/python_scripts/*'" 
 		
 		}
