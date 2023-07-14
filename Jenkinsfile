@@ -18,12 +18,13 @@ pipeline {
             steps{		
 		//sh "scp -r test.py srvamr-sfaops@10.191.97.113:/tmp"
 		//sh "scp -r test.py srvamr-sfaops@10.191.112.123:/tmp"   
-		sh "scp -r test.py srvamr-sfaops@10.191.117.73:/tmp" 
-		sh "scp -r test.py srvamr-sfaops@10.191.123.96:/tmp" 
-                //sh "ssh srvamr-sfaops@10.191.112.123 'chmod -R 775 /tmp/test.py'"
-		sh "ssh srvamr-sfaops@10.191.97.113 'chmod -R 775 /tmp/test.py'"
-		sh "ssh srvamr-sfaops@10.191.117.73 'chmod -R 775 /tmp/test.py'"
-		sh "ssh srvamr-sfaops@10.191.123.96 'chmod -R 775 /tmp/test.py'"
+		//sh "scp -r test.py srvamr-sfaops@10.191.117.73:/tmp" 
+		//sh "scp -r test.py srvamr-sfaops@10.191.123.96:/tmp" 
+                //sh "ssh srvamr-sfaops@10.191.112.123 'chmod -R 775 /app/etl/palign/scripts/scripts_ui/python_scripts/'"
+		//sh "ssh srvamr-palig@10.191.97.113 'ls /app/etl/palign/scripts/scripts_ui/python_scripts/'"
+		sh "ssh srvamr-palig@10.191.97.113 'chmod -R 775 /app/etl/palign/scripts/scripts_ui/python_scripts/'"    
+		//sh "ssh srvamr-sfaops@10.191.117.73 'chmod -R 775 /tmp/test.py'"
+		//sh "ssh srvamr-sfaops@10.191.123.96 'chmod -R 775 /tmp/test.py'"
 		}
             
 				
