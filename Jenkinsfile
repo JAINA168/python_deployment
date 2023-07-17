@@ -3,7 +3,7 @@
 pipeline {
     agent any
     environment{
-	jilDirectory='Autosys'
+	jilDirectory='/app/etl/palign/scripts/scripts_ui/python_scripts'
 	apiEndpoint='https://amraelp00011055.pfizer.com:9443/AEWS/jil'
     }
     parameters {
@@ -17,7 +17,7 @@ pipeline {
             }
             steps{		
 		sh "scp -i /var/lib/jenkins/.ssh/id_rsa ./python_scripts/* srvamr-sfaops@amer@10.191.112.123:/app/etl/palign/scripts/scripts_ui/python_scripts"
-		//sh "ssh -i /var/lib/jenkins/.ssh/id_rsa srvamr-sfaops@amer@10.191.112.123 'sudo chmod 775 /app/etl/palign/scripts/scripts_ui/python_scripts/*'" 
+		sh "ssh -i /var/lib/jenkins/.ssh/id_rsa srvamr-sfaops@amer@10.191.112.123 'sudo chmod 775 ${env.jilDirectory}/*'" 
 		
 		//sh "scp -i /var/lib/jenkins/.ssh/id_rsa test1.py srvamr-sfaops@amer@10.191.117.73:/app/etl/palign/scripts/scripts_ui/python_scripts"
 		//sh "ssh -i /var/lib/jenkins/.ssh/id_rsa srvamr-sfaops@amer@10.191.117.73 'sudo chmod 775 /app/etl/palign/scripts/scripts_ui/python_scripts/*'"
