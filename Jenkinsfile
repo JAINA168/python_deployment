@@ -7,7 +7,7 @@ pipeline {
 	jilDirectory='autosys/'
 	autosys_apiEndpoint='https://amraelp00011055.pfizer.com:9443/AEWS/jil'
 	unix_server = "emaaelp00010116"
-        unix_src_path_scripts = "autosys"
+        unix_src_path_scripts = "python_scripts"
         unix_deploy_path_scripts = "/tmp"
         unix_service_account = "srvamr-sfaops@amer"
         unix_permission = "775"
