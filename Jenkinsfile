@@ -4,7 +4,7 @@ pipeline {
     agent any
     environment{
  	autosys_main_server= 'emaaelp00010116'
-	jilDirectory='python_scripts/'
+	jilDirectory='python_scripts'
 	autosys_apiEndpoint='https://amraelp00011055.pfizer.com:9443/AEWS/jil'
 	unix_server = "emaaelp00010116"
         unix_src_path_scripts = "python_scripts"
