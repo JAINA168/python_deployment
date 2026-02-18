@@ -11,10 +11,14 @@ pipeline {
         unix_deploy_path_scripts = "/tmp"
         unix_service_account = "srvamr-sfaops@amer"
         unix_permission = "775"
+		snowflake_db_url         = "${getProperty("${env.BRANCH_NAME}_pfzalgn_snowflake_db_url_cfc_data_mgr")}"
+        snowflake_credid         = "${env.BRANCH_NAME}_central_emea_creds"
+        snowflake_changeLogFile  = "snowflake/changelog.sf.xml"
 	priv_key_path = "/var/lib/jenkins/.ssh/palign_id_rsa"    
     }
     parameters {
-        choice choices: ['No', 'Yes'], description: 'Mention if You want to Deploy into Autosys Environment', name: 'Deploy_to_Autosys'
+    choice choices: ['No', 'Yes'], description: 'Mention if You want to Deploy into Autosys Environment', name: 'Deploy_to_Autosys'
+	choice choices: ['No', 'Yes'], description: 'Mention if You want to Deploy into Snowflake Environment', name: 'Deploy_to_Snowflake'
 	choice choices: ['No', 'Yes'], description: 'Mention if You want to Deploy into Unix Environment', name: 'Deploy_to_Unix'
 	choice choices: ['Yes', 'No'], description: 'Mention if You want to Dry Run', name: 'dry_run'    
 	choice choices: ['No', 'Yes'], description: 'If you want to send alerts', name: 'Email_Alert'
@@ -37,6 +41,17 @@ pipeline {
 			// sh "scp -i ${priv_key_path} -r ${unix_src_path_scripts}/* ${unix_service_account}@${unix_server}:${unix_deploy_path_scripts}"    
                      }
                 }
+        }
+		stage("Deploy to Snowflake Database") {
+            when {
+                expression { params.Deploy_to_Snowflake == "Yes" }
+            }
+            steps {
+                script {
+                    println "Deploying into Snowflake ${env.BRANCH_NAME} environment"
+                    snowflake_deploy(url: snowflake_db_url, cred: snowflake_credid, changelog: snowflake_changeLogFile, dry_run: dry_run)
+                }
+            }
         }
         
         stage ("Deploy to Autosys"){
