@@ -93,7 +93,7 @@ pipeline {
                             if [ "\$CHANGES_DETECTED" = true ]; then
                                 echo "Committing DDLs and updated snapshots..."
                                 git commit -m "Auto-sync: Incremental DDL changes from Dev DB [\$TIMESTAMP]"
-                                git push https://\${GIT_USER}:${env.encodedGitPass}@\${params.git_repository.replace('https://','')} HEAD:${env.BRANCH_NAME}
+                                git push https://\${USER}:${env.encodedGitPass}@\${params.git_repository.replace('https://','')} HEAD:${env.BRANCH_NAME}
                                 echo "Successfully pushed to GitHub!"
                             else
                                 echo "No database differences found across the schemas."
