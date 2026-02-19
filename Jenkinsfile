@@ -54,16 +54,16 @@ pipeline {
                     println "Generating Liquibase diff files for schemas using Dev DB offline snapshots..."
                     withCredentials([
                         usernamePassword(credentialsId: "${env.snowflake_credid}", passwordVariable: 'DEV_PASS', usernameVariable: 'DEV_USER'),
-                        usernamePassword(credentialsId: 'SRVAMR-COMMGIT', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')
+                        usernamePassword(credentialsId: 'SRVAMR-COMMGIT', usernameVariable: 'USER', passwordVariable: 'PASS')
                     ]) {
-                        env.encodedGitPass = URLEncoder.encode(GIT_PASS, "UTF-8")
+                        env.encodedGitPass = URLEncoder.encode(PASS, "UTF-8")
                         sh """
                             #!/bin/bash
                             TIMESTAMP=\$(date +"%Y%m%d_%H%M")
                             CHANGES_DETECTED=false
                             read -r -a SCHEMAS <<< "${env.snowflake_sync_schemas}"
-                            git config user.name "\${GIT_USER}"
-                            git config user.email "\${GIT_USER}@pfizer.com"
+                            git config user.name "\${USER}"
+                            git config user.email "\${USER}@pfizer.com"
                             mkdir -p snowflake/snapshots
                             mkdir -p snowflake/ddls
                             for SCHEMA in "\${SCHEMAS[@]}"; do
