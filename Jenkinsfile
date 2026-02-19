@@ -13,7 +13,7 @@ pipeline {
         unix_service_account = "srvamr-sfaops@amer"
         unix_permission = "775"
         snowflake_db_url = "${getProperty("${env.BRANCH_NAME}_gitsync_test")}"
-        snowflake_credid = "${env.BRANCH_NAME}_central_emea_creds"
+        snowflake_credid = "dev_central_emea_creds"
         snowflake_sync_schemas = "COMETL_SFDC_CONTROL COMETL_SFDC_STAGING COMETL_SFDC_SYNC COMETL_SFDC_REPLICATION COMETL_SFDC_LANDING"
         snowflake_changeLogFile = "snowflake/changelog.sf.xml"
         priv_key_path = "/var/lib/jenkins/.ssh/palign_id_rsa"
