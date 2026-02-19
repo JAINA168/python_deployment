@@ -73,7 +73,7 @@ pipeline {
                                 FULL_JDBC_URL="${env.snowflake_db_url}&schema=\$SCHEMA"
                                 if [ ! -f "\$SNAPSHOT_FILE" ]; then
                                     echo "Creating baseline snapshot for \$SCHEMA..."
-                                    liquibase --url="\$FULL_JDBC_URL" --username="\${DEV_USER}" --password="\${DEV_PASS}" snapshot --snapshotFormat=json --outputFile="\$SNAPSHOT_FILE"
+                                    liquibase --url="\$FULL_JDBC_URL" --username="\${DEV_USER}" --password="\${DEV_PASS}" snapshot --snapshotFormat=sql --outputFile="\$SNAPSHOT_FILE"
                                     git add "\$SNAPSHOT_FILE"
                                     CHANGES_DETECTED=true
                                     continue
@@ -82,7 +82,7 @@ pipeline {
                                 liquibase --url="\$FULL_JDBC_URL" --username="\${DEV_USER}" --password="\${DEV_PASS}" diffChangeLog --referenceUrl="offline:snowflake?snapshot=\$SNAPSHOT_FILE" --changeLogFile="\$DIFF_FILE" --format=sql --diffTypes="tables,views,columns,indexes,sequences"
                                 if [ -s "\$DIFF_FILE" ] && grep -qi "CREATE\\|ALTER\\|DROP" "\$DIFF_FILE"; then
                                     echo "Incremental changes found in \$SCHEMA!"
-                                    liquibase --url="\$FULL_JDBC_URL" --username="\${DEV_USER}" --password="\${DEV_PASS}" snapshot --snapshotFormat=json --outputFile="\$SNAPSHOT_FILE"
+                                    liquibase --url="\$FULL_JDBC_URL" --username="\${DEV_USER}" --password="\${DEV_PASS}" snapshot --snapshotFormat=sql --outputFile="\$SNAPSHOT_FILE"
                                     git add "\$DIFF_FILE"
                                     git add "\$SNAPSHOT_FILE"
                                     CHANGES_DETECTED=true
