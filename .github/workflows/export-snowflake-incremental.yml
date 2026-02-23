@@ -30,33 +30,30 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
-
-          # ✅ FIX: Liquibase tar install does not include DB drivers. Add Snowflake JDBC + Liquibase Snowflake extension.
+     # ✅ FIX: add Snowflake JDBC driver + Liquibase Snowflake extension
+     # ✅ FIX: place jars into Liquibase lib so Liquibase can load them
      - name: Install Snowflake JDBC driver + Liquibase Snowflake extension
        run: |
          set -euo pipefail
          mkdir -p lib
-         # Snowflake JDBC driver (stable)
          curl -sL -o lib/snowflake-jdbc.jar \
             https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.16.1/snowflake-jdbc-3.16.1.jar
-         # Liquibase Snowflake extension - match Liquibase version
          curl -sL -o lib/liquibase-snowflake.jar \
             https://repo1.maven.org/maven2/org/liquibase/ext/liquibase-snowflake/4.29.2/liquibase-snowflake-4.29.2.jar
-         
-         ls -lh lib
-
-     # Key decryption can fail for some OpenSSL v3 encrypted keys unless BouncyCastle is enabled.
-     # Snowflake documents enabling it via JVM argument.  [oai_citation:3‡Snowflake Documentation](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure?utm_source=chatgpt.com)
+         sudo mkdir -p /opt/liquibase/lib
+         sudo cp -v lib/*.jar /opt/liquibase/lib/
+         ls -lh /opt/liquibase/lib
+     # Some environments need this to decrypt encrypted PKCS8 keys
      - name: Enable BouncyCastle for Snowflake JDBC key decryption
        run: |
          echo "JAVA_OPTS=-Dnet.snowflake.jdbc.enableBouncyCastle=true" >> $GITHUB_ENV
-     # ✅ No base64. No openssl conversion. Store encrypted .p8 (PEM text) directly in secret.
-     - name: Create encrypted .p8 key file from secret
+     # ✅ PEM TEXT in secret (NOT base64)
+     - name: Create encrypted .p8 key file from PEM text secret
        env:
-         P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
+         P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_P8_PEM }}
        run: |
          set -euo pipefail
-         # printf preserves newlines exactly as stored
+         # preserves newlines exactly as stored in the secret
          printf "%s" "$P8_PEM" > snowflake_key.p8
          chmod 600 snowflake_key.p8
          echo "Key file created. Header:"
@@ -64,11 +61,12 @@ jobs:
      - name: Export incremental changes -> new branch
        env:
          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
-         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # no schema; we append it
+         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # should start with jdbc:snowflake://...
          SF_KEY_PWD: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
          SCHEMAS: ${{ inputs.schemas }}
        run: |
          set -euo pipefail
+         DRIVER="net.snowflake.client.jdbc.SnowflakeDriver"
          TIMESTAMP=$(date +"%Y%m%d_%H%M")
          BRANCH="db-export-${TIMESTAMP}"
          git config user.name "github-actions[bot]"
@@ -87,15 +85,10 @@ jobs:
              /^--/                       {print > ddl;print > dml;print > procs;next}
              {
                line=toupper($0)
-               # BLOCK DROP always
                if (line ~ /^DROP[[:space:]]+/) next
-               # PROCS / FUNCTIONS
                if (line ~ /(CREATE|ALTER).* (PROCEDURE|FUNCTION)/) { print > procs; next }
-               # DML
                if (line ~ /^(INSERT|UPDATE|DELETE|MERGE|COPY)[[:space:]]+/) { print > dml; next }
-               # DDL (and grants)
                if (line ~ /(CREATE|ALTER|GRANT|REVOKE)/) { print > ddl; next }
-               # fallback
                print > ddl
              }
            ' ddl="$DDL" dml="$DML" procs="$PROCS" "$RAW"
@@ -105,23 +98,31 @@ jobs:
              fi
            done
          }
+         # Append params correctly whether SF_JDBC_URL already has '?'
+         add_params () {
+           local base="$1"
+           local params="$2"
+           if [[ "$base" == *\?* ]]; then
+             echo "${base}&${params}"
+           else
+             echo "${base}?${params}"
+           fi
+         }
          for SCHEMA in $SCHEMAS; do
            echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           # ✅ Use Snowflake JDBC parameters for encrypted private key auth:
-           # private_key_file + private_key_pwd.  [oai_citation:4‡Snowflake Documentation](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure?utm_source=chatgpt.com)
-           LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_pwd=${SF_KEY_PWD}"
-           # First run: baseline snapshot
+           PARAMS="schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_pwd=${SF_KEY_PWD}"
+           LIVE_URL="$(add_params "$SF_JDBC_URL" "$PARAMS")"
            if [ ! -f "$SNAPSHOT" ]; then
              echo "Creating baseline snapshot for $SCHEMA..."
-             liquibase --url="$LIVE_URL" --username="$SF_USER" \
+             liquibase --driver="$DRIVER" --url="$LIVE_URL" --username="$SF_USER" \
                snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
              git add "$SNAPSHOT"
              continue
            fi
-           # Reverse diff: offline snapshot (Git) vs live Snowflake DEV
-           liquibase --url="offline:snowflake?snapshot=$SNAPSHOT" \
+           liquibase --driver="$DRIVER" \
+             --url="offline:snowflake?snapshot=$SNAPSHOT" \
              --referenceUrl="$LIVE_URL" --referenceUsername="$SF_USER" \
              diffChangeLog --changeLogFile="$RAW"
            if [ ! -s "$RAW" ] || ! grep -Eqi "CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$RAW"; then
@@ -133,8 +134,7 @@ jobs:
            DML_OUT="snowflake/dmls/${TIMESTAMP}_${SCHEMA}.sql"
            PROC_OUT="snowflake/procs/${TIMESTAMP}_${SCHEMA}.sql"
            route_changes "$RAW" "$DDL_OUT" "$DML_OUT" "$PROC_OUT"
-           # Update snapshot checkpoint so next run is incremental
-           liquibase --url="$LIVE_URL" --username="$SF_USER" \
+           liquibase --driver="$DRIVER" --url="$LIVE_URL" --username="$SF_USER" \
              snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
            git add "$SNAPSHOT"
            [ -f "$DDL_OUT" ] && git add "$DDL_OUT"
