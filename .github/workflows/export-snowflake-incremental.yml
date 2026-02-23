@@ -53,7 +53,7 @@ jobs:
      # ✅ No base64. No openssl conversion. Store encrypted .p8 (PEM text) directly in secret.
      - name: Create encrypted .p8 key file from secret
        env:
-         P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_P8_PEM }}
+         P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
        run: |
          set -euo pipefail
          # printf preserves newlines exactly as stored
