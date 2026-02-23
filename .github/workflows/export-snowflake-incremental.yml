@@ -47,8 +47,7 @@ jobs:
      - name: Enable BouncyCastle for Snowflake JDBC key decryption
        run: |
          echo "JAVA_OPTS=-Dnet.snowflake.jdbc.enableBouncyCastle=true" >> $GITHUB_ENV
-     # ✅ You said: "p8 file text and simple password"
-     # Store the PEM TEXT (-----BEGIN ENCRYPTED PRIVATE KEY----- ...) in this secret.
+     # ✅ PEM TEXT secret (-----BEGIN ENCRYPTED PRIVATE KEY----- ...)
      - name: Create encrypted .p8 key file from PEM text secret
        env:
          P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_P8_PEM }}
@@ -61,11 +60,12 @@ jobs:
      - name: Export incremental changes -> new branch
        env:
          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
-         # IMPORTANT: This MUST be ONLY the host part (no '?' params)
-         # Example: jdbc:snowflake://xxxxxx.snowflakecomputing.com
+         # IMPORTANT: host ONLY, no params
+         # Example:
+         # jdbc:snowflake://emeadev01.eu-west-1.privatelink.snowflakecomputing.com
          SF_JDBC_HOST: ${{ secrets.SNOWFLAKE_JDBC_HOST }}
          SF_KEY_PWD: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
-         # Optional but recommended to avoid future issues:
+         # Optional but recommended
          SF_DB: ${{ secrets.SNOWFLAKE_DATABASE }}
          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
@@ -109,18 +109,25 @@ jobs:
              fi
            done
          }
-         # Build JDBC URL safely (no parse errors)
-         # SF_JDBC_HOST MUST NOT contain '?' or params.
+         # Optional guard: fail early if any values contain spaces (breaks JDBC parsing unless URL-encoded)
+         for v in SF_DB SF_WAREHOUSE SF_ROLE; do
+           if [[ "${!v:-}" == *" "* ]]; then
+             echo "ERROR: $v contains spaces. URL-encode it or remove spaces."
+             exit 1
+           fi
+         done
          for SCHEMA in $SCHEMAS; do
            echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           # Include DB/WH/ROLE only if provided (recommended)
            PARAMS="schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_pwd=${SF_KEY_PWD}"
            if [ -n "${SF_DB:-}" ]; then PARAMS="db=${SF_DB}&${PARAMS}"; fi
            if [ -n "${SF_WAREHOUSE:-}" ]; then PARAMS="warehouse=${SF_WAREHOUSE}&${PARAMS}"; fi
            if [ -n "${SF_ROLE:-}" ]; then PARAMS="role=${SF_ROLE}&${PARAMS}"; fi
-           LIVE_URL="${SF_JDBC_HOST}?${PARAMS}"
+           # ✅ FIX: enforce "/?" before query string so Snowflake JDBC can parse it
+           LIVE_URL="${SF_JDBC_HOST%/}/?${PARAMS}"
+           # Debug (safe): shows prefix only
+           echo "JDBC prefix: ${LIVE_URL%%\?*}"
            # First run: baseline snapshot
            if [ ! -f "$SNAPSHOT" ]; then
              echo "Creating baseline snapshot for $SCHEMA..."
