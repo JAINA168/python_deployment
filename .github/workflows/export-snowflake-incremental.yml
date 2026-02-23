@@ -16,7 +16,7 @@ jobs:
        uses: actions/checkout@v4
        with:
          fetch-depth: 0
-     - name: Install Java (Liquibase runtime)
+     - name: Install Java
        uses: actions/setup-java@v4
        with:
          distribution: temurin
@@ -30,9 +30,7 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
-     # ✅ REQUIRED: Liquibase tar install does not include DB drivers.
-     # ✅ REQUIRED: Put jars into Liquibase lib so Liquibase can load them.
-     - name: Install Snowflake JDBC driver + Liquibase Snowflake extension
+     - name: Install Snowflake JDBC + Extension
        run: |
          set -euo pipefail
          mkdir -p lib
@@ -41,31 +39,23 @@ jobs:
          curl -sL -o lib/liquibase-snowflake.jar \
           https://repo1.maven.org/maven2/org/liquibase/ext/liquibase-snowflake/4.29.2/liquibase-snowflake-4.29.2.jar
          sudo mkdir -p /opt/liquibase/lib
-         sudo cp -v lib/*.jar /opt/liquibase/lib/
-         ls -lh /opt/liquibase/lib
-     # Some environments need this to decrypt encrypted PKCS8 keys
-     - name: Enable BouncyCastle for Snowflake JDBC key decryption
+         sudo cp lib/*.jar /opt/liquibase/lib/
+     - name: Enable BouncyCastle
        run: |
          echo "JAVA_OPTS=-Dnet.snowflake.jdbc.enableBouncyCastle=true" >> $GITHUB_ENV
-     # ✅ PEM TEXT secret (-----BEGIN ENCRYPTED PRIVATE KEY----- ...)
-     - name: Create encrypted .p8 key file from PEM text secret
+     - name: Create encrypted .p8 key
        env:
          P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_P8_PEM }}
        run: |
          set -euo pipefail
          printf "%s" "$P8_PEM" > snowflake_key.p8
          chmod 600 snowflake_key.p8
-         echo "Key file created. Header:"
          head -n 1 snowflake_key.p8
      - name: Export incremental changes -> new branch
        env:
          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
-         # IMPORTANT: host ONLY, no params
-         # Example:
-         # jdbc:snowflake://emeadev01.eu-west-1.privatelink.snowflakecomputing.com
          SF_JDBC_HOST: ${{ secrets.SNOWFLAKE_JDBC_HOST }}
          SF_KEY_PWD: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
-         # Optional but recommended
          SF_DB: ${{ secrets.SNOWFLAKE_DATABASE }}
          SF_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
          SF_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
@@ -86,63 +76,50 @@ jobs:
            DML="$3"
            PROCS="$4"
            awk '
-             /^--liquibase formatted sql/ {print > ddl;print > dml;print > procs;next}
-             /^--changeset/              {print > ddl;print > dml;print > procs;next}
-             /^--/                       {print > ddl;print > dml;print > procs;next}
-             {
-               line=toupper($0)
-               # BLOCK DROP always
-               if (line ~ /^DROP[[:space:]]+/) next
-               # PROCS / FUNCTIONS
-               if (line ~ /(CREATE|ALTER).* (PROCEDURE|FUNCTION)/) { print > procs; next }
-               # DML
-               if (line ~ /^(INSERT|UPDATE|DELETE|MERGE|COPY)[[:space:]]+/) { print > dml; next }
-               # DDL (and grants)
-               if (line ~ /(CREATE|ALTER|GRANT|REVOKE)/) { print > ddl; next }
-               # fallback
-               print > ddl
+           /^--/ {print > ddl; print > dml; print > procs; next}
+           {
+             line=toupper($0)
+             if (line ~ /^DROP[[:space:]]+/) next
+             if (line ~ /(CREATE|ALTER).* (PROCEDURE|FUNCTION)/){
+               print > procs; next
              }
-           ' ddl="$DDL" dml="$DML" procs="$PROCS" "$RAW"
-           for f in "$DDL" "$DML" "$PROCS"; do
-             if [ ! -s "$f" ] || ! grep -Eqi "CREATE|ALTER|GRANT|REVOKE|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$f"; then
-               rm -f "$f" || true
-             fi
-           done
+             if (line ~ /^(INSERT|UPDATE|DELETE|MERGE|COPY)/){
+               print > dml; next
+             }
+             if (line ~ /(CREATE|ALTER|GRANT|REVOKE)/){
+               print > ddl; next
+             }
+             print > ddl
+           }' ddl="$DDL" dml="$DML" procs="$PROCS" "$RAW"
          }
-         # Optional guard: fail early if any values contain spaces (breaks JDBC parsing unless URL-encoded)
-         for v in SF_DB SF_WAREHOUSE SF_ROLE; do
-           if [[ "${!v:-}" == *" "* ]]; then
-             echo "ERROR: $v contains spaces. URL-encode it or remove spaces."
-             exit 1
-           fi
-         done
          for SCHEMA in $SCHEMAS; do
-           echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           PARAMS="schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_pwd=${SF_KEY_PWD}"
-           if [ -n "${SF_DB:-}" ]; then PARAMS="db=${SF_DB}&${PARAMS}"; fi
-           if [ -n "${SF_WAREHOUSE:-}" ]; then PARAMS="warehouse=${SF_WAREHOUSE}&${PARAMS}"; fi
-           if [ -n "${SF_ROLE:-}" ]; then PARAMS="role=${SF_ROLE}&${PARAMS}"; fi
-           # ✅ FIX: enforce "/?" before query string so Snowflake JDBC can parse it
+           # ✅ FIXED PARAM NAME HERE
+           PARAMS="schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_file_pwd=${SF_KEY_PWD}"
+           [ -n "${SF_DB:-}" ] && PARAMS="db=${SF_DB}&${PARAMS}"
+           [ -n "${SF_WAREHOUSE:-}" ] && PARAMS="warehouse=${SF_WAREHOUSE}&${PARAMS}"
+           [ -n "${SF_ROLE:-}" ] && PARAMS="role=${SF_ROLE}&${PARAMS}"
+           # ✅ FIXED URL FORMAT
            LIVE_URL="${SF_JDBC_HOST%/}/?${PARAMS}"
-           # Debug (safe): shows prefix only
-           echo "JDBC prefix: ${LIVE_URL%%\?*}"
-           # First run: baseline snapshot
+           echo "Processing $SCHEMA"
            if [ ! -f "$SNAPSHOT" ]; then
-             echo "Creating baseline snapshot for $SCHEMA..."
-             liquibase --driver="$DRIVER" --url="$LIVE_URL" --username="$SF_USER" \
-               snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
+             liquibase --driver="$DRIVER" \
+             --url="$LIVE_URL" \
+             --username="$SF_USER" \
+             snapshot \
+             --snapshotFormat=json \
+             --outputFile="$SNAPSHOT"
              git add "$SNAPSHOT"
              continue
            fi
-           # Reverse diff: offline snapshot (Git) vs live Snowflake
            liquibase --driver="$DRIVER" \
              --url="offline:snowflake?snapshot=$SNAPSHOT" \
-             --referenceUrl="$LIVE_URL" --referenceUsername="$SF_USER" \
-             diffChangeLog --changeLogFile="$RAW"
-           if [ ! -s "$RAW" ] || ! grep -Eqi "CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$RAW"; then
-             echo "No changes for $SCHEMA"
+             --referenceUrl="$LIVE_URL" \
+             --referenceUsername="$SF_USER" \
+             diffChangeLog \
+             --changeLogFile="$RAW"
+           if [ ! -s "$RAW" ]; then
              rm -f "$RAW"
              continue
            fi
@@ -150,9 +127,12 @@ jobs:
            DML_OUT="snowflake/dmls/${TIMESTAMP}_${SCHEMA}.sql"
            PROC_OUT="snowflake/procs/${TIMESTAMP}_${SCHEMA}.sql"
            route_changes "$RAW" "$DDL_OUT" "$DML_OUT" "$PROC_OUT"
-           # Update snapshot checkpoint so next run is incremental
-           liquibase --driver="$DRIVER" --url="$LIVE_URL" --username="$SF_USER" \
-             snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
+           liquibase --driver="$DRIVER" \
+             --url="$LIVE_URL" \
+             --username="$SF_USER" \
+             snapshot \
+             --snapshotFormat=json \
+             --outputFile="$SNAPSHOT"
            git add "$SNAPSHOT"
            [ -f "$DDL_OUT" ] && git add "$DDL_OUT"
            [ -f "$DML_OUT" ] && git add "$DML_OUT"
@@ -160,10 +140,9 @@ jobs:
            rm -f "$RAW"
          done
          if git diff --cached --quiet; then
-           echo "Nothing to commit."
+           echo "Nothing to commit"
            exit 0
          fi
-         git commit -m "Incremental Snowflake export (DDL+DML+PROCS) ${TIMESTAMP}"
+         git commit -m "Incremental Snowflake export ${TIMESTAMP}"
          git push --set-upstream origin "$BRANCH"
-         echo "✅ Branch pushed: $BRANCH"
-         echo "👉 Manual next step: Create PR and merge to dev/qa/prod."
+         echo "Branch pushed $BRANCH"
