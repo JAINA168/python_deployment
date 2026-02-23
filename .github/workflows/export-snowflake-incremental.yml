@@ -1,0 +1,142 @@
+name: Export incremental Snowflake changes (Liquibase + .p8)
+on:
+ workflow_dispatch:
+   inputs:
+     schemas:
+       description: "Space-separated schema list"
+       required: true
+       default: "COMETL_SFDC_CONTROL COMETL_SFDC_STAGING COMETL_SFDC_SYNC COMETL_SFDC_REPLICATION COMETL_SFDC_LANDING"
+jobs:
+ export:
+   runs-on: ubuntu-latest
+   permissions:
+     contents: write
+   steps:
+     - name: Checkout
+       uses: actions/checkout@v4
+       with:
+         fetch-depth: 0
+     - name: Install Java
+       uses: actions/setup-java@v4
+       with:
+         distribution: temurin
+         java-version: "17"
+     - name: Install Liquibase
+       run: |
+         set -euo pipefail
+         LIQUIBASE_VERSION="4.29.2"
+         curl -sL "https://github.com/liquibase/liquibase/releases/download/v${LIQUIBASE_VERSION}/liquibase-${LIQUIBASE_VERSION}.tar.gz" -o /tmp/liquibase.tgz
+         mkdir -p /opt/liquibase
+         tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
+         sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
+         liquibase --version
+     - name: Recreate Snowflake private key (.p8)
+       env:
+         KEY_B64: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
+       run: |
+         set -euo pipefail
+         echo "$KEY_B64" | base64 --decode > snowflake_key.p8
+         chmod 600 snowflake_key.p8
+     - name: Export incremental changes -> new branch
+       env:
+         SF_USER: ${{ secrets.SNOWFLAKE_USER }}
+         SF_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}
+         SCHEMAS: ${{ inputs.schemas }}
+       run: |
+         set -euo pipefail
+         TIMESTAMP=$(date +"%Y%m%d_%H%M")
+         BRANCH="db-export-${TIMESTAMP}"
+         git config user.name "github-actions[bot]"
+         git config user.email "github-actions[bot]@users.noreply.github.com"
+         git checkout -b "$BRANCH"
+         mkdir -p snowflake/snapshots
+         mkdir -p snowflake/ddls snowflake/dmls snowflake/procs
+         route_changes () {
+           RAW="$1"
+           DDL="$2"
+           DML="$3"
+           PROCS="$4"
+           awk '
+             /^--liquibase formatted sql/ {print > ddl;print > dml;print > procs;next}
+             /^--changeset/ {print > ddl;print > dml;print > procs;next}
+             /^--/ {print > ddl;print > dml;print > procs;next}
+             {
+               line=toupper($0)
+               # BLOCK DROP always
+               if (line ~ /^DROP[[:space:]]+/) next
+               # PROCS/FUNCTIONS
+               if (line ~ /(CREATE|ALTER).* (PROCEDURE|FUNCTION)/) { print > procs; next }
+               # DML
+               if (line ~ /^(INSERT|UPDATE|DELETE|MERGE|COPY)[[:space:]]+/) { print > dml; next }
+               # DDL
+               if (line ~ /(CREATE|ALTER|GRANT|REVOKE)/) { print > ddl; next }
+               print > ddl
+             }
+           ' ddl="$DDL" dml="$DML" procs="$PROCS" "$RAW"
+           # Remove empty outputs
+           for f in "$DDL" "$DML" "$PROCS"; do
+             if [ ! -s "$f" ] || ! grep -Eqi "CREATE|ALTER|GRANT|REVOKE|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$f"; then
+               rm -f "$f" || true
+             fi
+           done
+         }
+         CHANGES=false
+         for SCHEMA in $SCHEMAS; do
+           echo "---- Processing schema: $SCHEMA ----"
+           SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
+           RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
+           LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}"
+           # Baseline snapshot for first run
+           if [ ! -f "$SNAPSHOT" ]; then
+             echo "Creating baseline snapshot for $SCHEMA..."
+             liquibase --url="$LIVE_URL" \
+               --username="$SF_USER" \
+               --privateKeyFile="snowflake_key.p8" \
+               --privateKeyFilePassword="$SF_PASSPHRASE" \
+               snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
+             git add "$SNAPSHOT"
+             CHANGES=true
+             continue
+           fi
+           # Reverse diff: offline snapshot (git) vs live DEV DB
+           liquibase --url="offline:snowflake?snapshot=$SNAPSHOT" \
+             --referenceUrl="$LIVE_URL" \
+             --referenceUsername="$SF_USER" \
+             --referencePrivateKeyFile="snowflake_key.p8" \
+             --referencePrivateKeyFilePassword="$SF_PASSPHRASE" \
+             diffChangeLog --changeLogFile="$RAW"
+           if [ ! -s "$RAW" ] || ! grep -Eqi "CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$RAW"; then
+             echo "No changes for $SCHEMA"
+             rm -f "$RAW"
+             continue
+           fi
+           DDL_OUT="snowflake/ddls/${TIMESTAMP}_${SCHEMA}.sql"
+           DML_OUT="snowflake/dmls/${TIMESTAMP}_${SCHEMA}.sql"
+           PROC_OUT="snowflake/procs/${TIMESTAMP}_${SCHEMA}.sql"
+           route_changes "$RAW" "$DDL_OUT" "$DML_OUT" "$PROC_OUT"
+           # Update snapshot checkpoint
+           liquibase --url="$LIVE_URL" \
+             --username="$SF_USER" \
+             --privateKeyFile="snowflake_key.p8" \
+             --privateKeyFilePassword="$SF_PASSPHRASE" \
+             snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
+           git add "$SNAPSHOT"
+           [ -f "$DDL_OUT" ] && git add "$DDL_OUT"
+           [ -f "$DML_OUT" ] && git add "$DML_OUT"
+           [ -f "$PROC_OUT" ] && git add "$PROC_OUT"
+           CHANGES=true
+           rm -f "$RAW"
+         done
+         if [ "$CHANGES" = false ]; then
+           echo "No incremental changes detected."
+           exit 0
+         fi
+         if git diff --cached --quiet; then
+           echo "Nothing staged to commit."
+           exit 0
+         fi
+         git commit -m "Incremental Snowflake export (DDL+DML+PROCS) ${TIMESTAMP}"
+         git push --set-upstream origin "$BRANCH"
+         echo "✅ Branch pushed: $BRANCH"
+         echo "👉 Next: Create PR manually and merge to dev/qa/prod."
