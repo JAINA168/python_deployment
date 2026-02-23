@@ -30,6 +30,18 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
+
+          # ✅ FIX: Liquibase tar install does not include DB drivers. Add Snowflake JDBC + Liquibase Snowflake extension.
+     - name: Install Snowflake JDBC driver + Liquibase Snowflake extension
+       run: |
+         set -euo pipefail
+         mkdir -p lib
+         # Snowflake JDBC driver (stable)
+         curl -sL -o lib/snowflake-jdbc.jar \https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.16.1/snowflake-jdbc-3.16.1.jar
+         # Liquibase Snowflake extension - match Liquibase version
+         curl -sL -o lib/liquibase-snowflake.jar \https://repo1.maven.org/maven2/org/liquibase/ext/liquibase-snowflake/4.29.2/liquibase-snowflake-4.29.2.jar
+         ls -lh lib
+
      # Key decryption can fail for some OpenSSL v3 encrypted keys unless BouncyCastle is enabled.
      # Snowflake documents enabling it via JVM argument.  [oai_citation:3‡Snowflake Documentation](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure?utm_source=chatgpt.com)
      - name: Enable BouncyCastle for Snowflake JDBC key decryption
