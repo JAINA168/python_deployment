@@ -30,29 +30,27 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
-     # ✅ FIX: Liquibase does NOT accept --privateKeyFile / --privateKeyFilePassword flags.
-     # We instead convert .p8 -> unencrypted pkcs8 and pass it via JDBC connection property private_key_file.
-     - name: Recreate and convert Snowflake private key (.p8 -> .pk8)
+     # Key decryption can fail for some OpenSSL v3 encrypted keys unless BouncyCastle is enabled.
+     # Snowflake documents enabling it via JVM argument.  [oai_citation:3‡Snowflake Documentation](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure?utm_source=chatgpt.com)
+     - name: Enable BouncyCastle for Snowflake JDBC key decryption
+       run: |
+         echo "JAVA_OPTS=-Dnet.snowflake.jdbc.enableBouncyCastle=true" >> $GITHUB_ENV
+     # ✅ No base64. No openssl conversion. Store encrypted .p8 (PEM text) directly in secret.
+     - name: Create encrypted .p8 key file from secret
        env:
-         KEY_B64: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
-         KEY_PASS: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+         P8_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_P8_PEM }}
        run: |
          set -euo pipefail
-         # 1) Recreate encrypted .p8 from GitHub Secret
-         echo "$KEY_B64" | base64 --decode > snowflake_key.p8
+         # printf preserves newlines exactly as stored
+         printf "%s" "$P8_PEM" > snowflake_key.p8
          chmod 600 snowflake_key.p8
-         # 2) Convert encrypted .p8 to unencrypted PKCS8 key (Snowflake JDBC-friendly)
-         #    This uses the passphrase to decrypt the .p8, and writes an unencrypted pk8.
-         openssl pkcs8 \
-           -in snowflake_key.p8 \
-           -out snowflake_key.pk8 \
-           -passin pass:"$KEY_PASS" \
-           -nocrypt
-         chmod 600 snowflake_key.pk8
+         echo "Key file created. Header:"
+         head -n 1 snowflake_key.p8
      - name: Export incremental changes -> new branch
        env:
          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
-         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # NOTE: should NOT include schema; we append it
+         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # no schema; we append it
+         SF_KEY_PWD: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
          SCHEMAS: ${{ inputs.schemas }}
        run: |
          set -euo pipefail
@@ -63,8 +61,6 @@ jobs:
          git checkout -b "$BRANCH"
          mkdir -p snowflake/snapshots
          mkdir -p snowflake/ddls snowflake/dmls snowflake/procs
-         # Routes generated Liquibase formatted SQL into DDL/DML/PROCS buckets.
-         # DROP is ALWAYS blocked here.
          route_changes () {
            RAW="$1"
            DDL="$2"
@@ -88,39 +84,31 @@ jobs:
                print > ddl
              }
            ' ddl="$DDL" dml="$DML" procs="$PROCS" "$RAW"
-           # Delete empty outputs
            for f in "$DDL" "$DML" "$PROCS"; do
              if [ ! -s "$f" ] || ! grep -Eqi "CREATE|ALTER|GRANT|REVOKE|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$f"; then
                rm -f "$f" || true
              fi
            done
          }
-         CHANGES=false
          for SCHEMA in $SCHEMAS; do
            echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           # ✅ FIX: pass keypair auth via JDBC param private_key_file (NOT liquibase CLI flags)
-           # Make sure your SNOWFLAKE_JDBC_URL already contains warehouse/role/db as needed.
-           LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.pk8"
-           # First run: create baseline snapshot only
+           # ✅ Use Snowflake JDBC parameters for encrypted private key auth:
+           # private_key_file + private_key_pwd.  [oai_citation:4‡Snowflake Documentation](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure?utm_source=chatgpt.com)
+           LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.p8&private_key_pwd=${SF_KEY_PWD}"
+           # First run: baseline snapshot
            if [ ! -f "$SNAPSHOT" ]; then
              echo "Creating baseline snapshot for $SCHEMA..."
-             liquibase \
-               --url="$LIVE_URL" \
-               --username="$SF_USER" \
+             liquibase --url="$LIVE_URL" --username="$SF_USER" \
                snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
              git add "$SNAPSHOT"
-             CHANGES=true
              continue
            fi
            # Reverse diff: offline snapshot (Git) vs live Snowflake DEV
-           liquibase \
-             --url="offline:snowflake?snapshot=$SNAPSHOT" \
-             --referenceUrl="$LIVE_URL" \
-             --referenceUsername="$SF_USER" \
+           liquibase --url="offline:snowflake?snapshot=$SNAPSHOT" \
+             --referenceUrl="$LIVE_URL" --referenceUsername="$SF_USER" \
              diffChangeLog --changeLogFile="$RAW"
-           # Skip if no meaningful content
            if [ ! -s "$RAW" ] || ! grep -Eqi "CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$RAW"; then
              echo "No changes for $SCHEMA"
              rm -f "$RAW"
@@ -131,26 +119,19 @@ jobs:
            PROC_OUT="snowflake/procs/${TIMESTAMP}_${SCHEMA}.sql"
            route_changes "$RAW" "$DDL_OUT" "$DML_OUT" "$PROC_OUT"
            # Update snapshot checkpoint so next run is incremental
-           liquibase \
-             --url="$LIVE_URL" \
-             --username="$SF_USER" \
+           liquibase --url="$LIVE_URL" --username="$SF_USER" \
              snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
            git add "$SNAPSHOT"
            [ -f "$DDL_OUT" ] && git add "$DDL_OUT"
            [ -f "$DML_OUT" ] && git add "$DML_OUT"
            [ -f "$PROC_OUT" ] && git add "$PROC_OUT"
-           CHANGES=true
            rm -f "$RAW"
          done
-         if [ "$CHANGES" = false ]; then
-           echo "No incremental changes detected."
-           exit 0
-         fi
          if git diff --cached --quiet; then
-           echo "Nothing staged to commit."
+           echo "Nothing to commit."
            exit 0
          fi
          git commit -m "Incremental Snowflake export (DDL+DML+PROCS) ${TIMESTAMP}"
          git push --set-upstream origin "$BRANCH"
          echo "✅ Branch pushed: $BRANCH"
-         echo "👉 Next: Create PR manually and merge to dev/qa/prod."
+         echo "👉 Manual next step: Create PR and merge to dev/qa/prod."
