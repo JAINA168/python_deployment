@@ -37,9 +37,12 @@ jobs:
          set -euo pipefail
          mkdir -p lib
          # Snowflake JDBC driver (stable)
-         curl -sL -o lib/snowflake-jdbc.jar \https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.16.1/snowflake-jdbc-3.16.1.jar
+         curl -sL -o lib/snowflake-jdbc.jar \
+            https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.16.1/snowflake-jdbc-3.16.1.jar
          # Liquibase Snowflake extension - match Liquibase version
-         curl -sL -o lib/liquibase-snowflake.jar \https://repo1.maven.org/maven2/org/liquibase/ext/liquibase-snowflake/4.29.2/liquibase-snowflake-4.29.2.jar
+         curl -sL -o lib/liquibase-snowflake.jar \
+            https://repo1.maven.org/maven2/org/liquibase/ext/liquibase-snowflake/4.29.2/liquibase-snowflake-4.29.2.jar
+         
          ls -lh lib
 
      # Key decryption can fail for some OpenSSL v3 encrypted keys unless BouncyCastle is enabled.
