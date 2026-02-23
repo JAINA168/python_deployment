@@ -30,8 +30,6 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
-     # ✅ FIX: Liquibase does NOT accept --privateKeyFile / --privateKeyFilePassword flags.
-     # We instead convert .p8 -> unencrypted pkcs8 and pass it via JDBC connection property private_key_file.
      - name: Recreate and convert Snowflake private key (.p8 -> .pk8)
        env:
          KEY_B64: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
@@ -41,8 +39,7 @@ jobs:
          # 1) Recreate encrypted .p8 from GitHub Secret
          echo "$KEY_B64" | base64 --decode > snowflake_key.p8
          chmod 600 snowflake_key.p8
-         # 2) Convert encrypted .p8 to unencrypted PKCS8 key (Snowflake JDBC-friendly)
-         #    This uses the passphrase to decrypt the .p8, and writes an unencrypted pk8.
+         # 2) Convert encrypted .p8 to unencrypted PKCS8 key (Snowflake JDBC-friendly
          openssl pkcs8 \
            -in snowflake_key.p8 \
            -out snowflake_key.pk8 \
@@ -100,8 +97,6 @@ jobs:
            echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           # ✅ FIX: pass keypair auth via JDBC param private_key_file (NOT liquibase CLI flags)
-           # Make sure your SNOWFLAKE_JDBC_URL already contains warehouse/role/db as needed.
            LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.pk8"
            # First run: create baseline snapshot only
            if [ ! -f "$SNAPSHOT" ]; then
