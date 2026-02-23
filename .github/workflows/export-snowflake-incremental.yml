@@ -1,11 +1,11 @@
-name: Export incremental Snowflake changes (Liquibase + .p8 keypair)
+name: Export incremental Snowflake changes (Liquibase + .p8 keypair) - Option B
 on:
  workflow_dispatch:
    inputs:
      schemas:
        description: "Space-separated schema list"
        required: true
-       default: "COMETL_SFDC_CONTROL COMETL_SFDC_STAGING COMETL_SFDC_SYNC COMETL_SFDC_REPLICATION COMETL_SFDC_LANDING"
+       default: "COMETL_SFDC_STAGING COMETL_SFDC_SYNC COMETL_SFDC_REPLICATION COMETL_SFDC_LANDING"
 jobs:
  export:
    runs-on: ubuntu-latest
@@ -30,29 +30,45 @@ jobs:
          sudo tar -xzf /tmp/liquibase.tgz -C /opt/liquibase
          sudo ln -sf /opt/liquibase/liquibase /usr/local/bin/liquibase
          liquibase --version
-     # ✅ FIX: Liquibase does NOT accept --privateKeyFile / --privateKeyFilePassword flags.
-     # We instead convert .p8 -> unencrypted pkcs8 and pass it via JDBC connection property private_key_file.
-     - name: Recreate and convert Snowflake private key (.p8 -> .pk8)
+     # ✅ Option B key handling:
+     # - Store base64 of your encrypted .p8 in GitHub Secret SNOWFLAKE_PRIVATE_KEY_B64
+     # - Store passphrase in GitHub Secret SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
+     # - Recreate .p8 using Python (avoids base64/line-ending corruption)
+     # - Convert to unencrypted pkcs8 (.pk8) using OpenSSL on the runner
+     - name: Recreate encrypted .p8 from base64 (python-safe)
        env:
          KEY_B64: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}
+       run: |
+         set -euo pipefail
+         python3 - <<'PY'
+import base64, os, sys
+b64 = os.environ["KEY_B64"].strip()
+data = base64.b64decode(b64)
+with open("snowflake_key.p8","wb") as f:
+   f.write(data)
+print("Wrote snowflake_key.p8 bytes:", len(data))
+PY
+         chmod 600 snowflake_key.p8
+         file snowflake_key.p8 || true
+     - name: Convert encrypted .p8 -> unencrypted PKCS8 (.pk8) on runner
+       env:
          KEY_PASS: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
        run: |
          set -euo pipefail
-         # 1) Recreate encrypted .p8 from GitHub Secret
-         echo "$KEY_B64" | base64 --decode > snowflake_key.p8
-         chmod 600 snowflake_key.p8
-         # 2) Convert encrypted .p8 to unencrypted PKCS8 key (Snowflake JDBC-friendly)
-         #    This uses the passphrase to decrypt the .p8, and writes an unencrypted pk8.
+         # Helpful debug: show first line (won't leak secrets, just header)
+         head -n 1 snowflake_key.p8 || true
+         # Convert to unencrypted PKCS8 key (Snowflake JDBC reads this reliably)
          openssl pkcs8 \
            -in snowflake_key.p8 \
            -out snowflake_key.pk8 \
            -passin pass:"$KEY_PASS" \
            -nocrypt
          chmod 600 snowflake_key.pk8
+         file snowflake_key.pk8 || true
      - name: Export incremental changes -> new branch
        env:
          SF_USER: ${{ secrets.SNOWFLAKE_USER }}
-         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # NOTE: should NOT include schema; we append it
+         SF_JDBC_URL: ${{ secrets.SNOWFLAKE_JDBC_URL }}   # should NOT include schema; we append it
          SCHEMAS: ${{ inputs.schemas }}
        run: |
          set -euo pipefail
@@ -64,7 +80,7 @@ jobs:
          mkdir -p snowflake/snapshots
          mkdir -p snowflake/ddls snowflake/dmls snowflake/procs
          # Routes generated Liquibase formatted SQL into DDL/DML/PROCS buckets.
-         # DROP is ALWAYS blocked here.
+         # DROP is ALWAYS blocked.
          route_changes () {
            RAW="$1"
            DDL="$2"
@@ -95,13 +111,11 @@ jobs:
              fi
            done
          }
-         CHANGES=false
          for SCHEMA in $SCHEMAS; do
            echo "---- Processing schema: $SCHEMA ----"
            SNAPSHOT="snowflake/snapshots/${SCHEMA}.json"
            RAW="/tmp/${TIMESTAMP}_${SCHEMA}_raw.sql"
-           # ✅ FIX: pass keypair auth via JDBC param private_key_file (NOT liquibase CLI flags)
-           # Make sure your SNOWFLAKE_JDBC_URL already contains warehouse/role/db as needed.
+           # ✅ Keypair auth via JDBC property private_key_file
            LIVE_URL="${SF_JDBC_URL}&schema=${SCHEMA}&private_key_file=$(pwd)/snowflake_key.pk8"
            # First run: create baseline snapshot only
            if [ ! -f "$SNAPSHOT" ]; then
@@ -111,7 +125,6 @@ jobs:
                --username="$SF_USER" \
                snapshot --snapshotFormat=json --outputFile="$SNAPSHOT"
              git add "$SNAPSHOT"
-             CHANGES=true
              continue
            fi
            # Reverse diff: offline snapshot (Git) vs live Snowflake DEV
@@ -120,7 +133,6 @@ jobs:
              --referenceUrl="$LIVE_URL" \
              --referenceUsername="$SF_USER" \
              diffChangeLog --changeLogFile="$RAW"
-           # Skip if no meaningful content
            if [ ! -s "$RAW" ] || ! grep -Eqi "CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|COPY|PROCEDURE|FUNCTION" "$RAW"; then
              echo "No changes for $SCHEMA"
              rm -f "$RAW"
@@ -139,18 +151,13 @@ jobs:
            [ -f "$DDL_OUT" ] && git add "$DDL_OUT"
            [ -f "$DML_OUT" ] && git add "$DML_OUT"
            [ -f "$PROC_OUT" ] && git add "$PROC_OUT"
-           CHANGES=true
            rm -f "$RAW"
          done
-         if [ "$CHANGES" = false ]; then
-           echo "No incremental changes detected."
-           exit 0
-         fi
          if git diff --cached --quiet; then
-           echo "Nothing staged to commit."
+           echo "Nothing to commit."
            exit 0
          fi
          git commit -m "Incremental Snowflake export (DDL+DML+PROCS) ${TIMESTAMP}"
          git push --set-upstream origin "$BRANCH"
          echo "✅ Branch pushed: $BRANCH"
-         echo "👉 Next: Create PR manually and merge to dev/qa/prod."
+         echo "👉 Manual next step: Create PR and merge to dev/qa/prod."
